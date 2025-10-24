@@ -1,155 +1,162 @@
-import 'dart:io';
-import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
 import 'dart:convert';
-import 'package:path_provider/path_provider.dart';
+
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-class PathologyForm extends StatefulWidget {
-  final Map<String, dynamic> pathology;
+import '../models/models.dart';
+import '../services/api_service.dart';
 
-  const PathologyForm({super.key, required this.pathology});
+// ESTA ES LA DEFINICIÓN DEL WIDGET 'PathologyForm' QUE FALTABA
+class PathologyForm extends StatefulWidget {
+  final Group group;
+  final PathologyType pathologyType;
+
+  const PathologyForm({
+    super.key,
+    required this.group,
+    required this.pathologyType,
+  });
 
   @override
   State<PathologyForm> createState() => _PathologyFormState();
 }
 
 class _PathologyFormState extends State<PathologyForm> {
-  String? _severity;
-  File? _photoFile;
+  final ApiService _apiService = ApiService();
   final TextEditingController _notesCtrl = TextEditingController();
-  final ImagePicker _picker = ImagePicker();
-  bool _sending = false;
+  bool _isProcessing = false;
 
-  // --- Tomar foto con cámara ---
-  Future<void> _takePhoto() async {
-    final XFile? file =
-        await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
-    if (file == null) return;
-
-    final appDir = await getApplicationDocumentsDirectory();
-    final fileName = 'pav_${DateTime.now().millisecondsSinceEpoch}.jpg';
-    final saved = await File(file.path).copy('${appDir.path}/$fileName');
-
-    setState(() {
-      _photoFile = saved;
-    });
-  }
-
-  // --- Enviar solicitud a Raspberry Pi ---
-  Future<void> _sendToPi() async {
-    if (_severity == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecciona severidad')),
-      );
-      return;
-    }
-
-    setState(() => _sending = true);
+  /// Orquesta el flujo completo: llama a Kinect y luego guarda en Django.
+  Future<void> _evaluateAndSaveRecord() async {
+    setState(() => _isProcessing = true);
 
     try {
-      // Usa el nombre de la patología para construir la URL
-      final pathologyName =
-          widget.pathology['name']?.toLowerCase() ?? 'baches';
-      final uri = Uri.parse(
-          'http://10.194.151.75:8000/api/kinect/evaluar/?patologia=$pathologyName');
+      // 1. Obtiene la predicción de la Raspberry Pi.
+      final dynamic kinectData = await _getKinectPrediction();
 
-      // Realiza la solicitud GET al endpoint de la Raspberry
-      final response =
-          await http.get(uri).timeout(const Duration(seconds: 20));
+      // VERIFICACIÓN DE SEGURIDAD: Si el widget ya no existe, detenemos el proceso.
+      if (!mounted) return;
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
+      // 2. Extrae la severidad del texto de forma segura.
+      final String predictedSeverityString = _parseSeverityFromResponse(kinectData);
+      
+      // 3. Convierte la respuesta a nuestro formato interno.
+      final Severity predictedSeverity =
+          _mapSeverityFromString(predictedSeverityString);
 
-        showDialog(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('Respuesta de Raspberry Pi'),
-            content: Text(const JsonEncoder.withIndent('  ').convert(decoded)),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cerrar'),
-              ),
-            ],
-          ),
-        );
-      } else {
-        throw Exception(
-            'Error ${response.statusCode}: ${response.reasonPhrase}');
-      }
-    } catch (e) {
+      // 4. Obtiene la respuesta completa para guardarla en las notas.
+      final String fullKinectResponse = _getRawResponseForNotes(kinectData);
+      final combinedNotes = """
+${_notesCtrl.text}
+
+--- Datos de Kinect ---
+$fullKinectResponse
+""";
+
+      // 5. Guarda el registro en el backend de Django.
+      await _apiService.createPathologyRecord(
+        groupId: widget.group.id,
+        pathologyName: widget.pathologyType.name,
+        severity: predictedSeverity.label,
+        notes: combinedNotes,
+      );
+
+      // VERIFICACIÓN DE SEGURIDAD: Antes de usar el context para mostrar el SnackBar.
+      if (!mounted) return;
+      
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error enviando solicitud: $e')),
+        const SnackBar(content: Text('¡Evaluación guardada con éxito!')),
+      );
+      Navigator.pop(context);
+
+    } catch (e) {
+      // VERIFICACIÓN DE SEGURIDAD: También al manejar errores.
+      if (!mounted) return;
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error en el proceso: $e')),
       );
     } finally {
-      setState(() => _sending = false);
+      // VERIFICACIÓN DE SEGURIDAD: Antes de actualizar el estado final.
+      if (mounted) {
+        setState(() => _isProcessing = false);
+      }
     }
   }
 
-  // --- Guardar registro localmente (simulado) ---
-  void _saveLocal() {
-    if (_severity == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecciona severidad')),
-      );
-      return;
+  /// Parsea la respuesta de la Kinect para encontrar la severidad de forma segura.
+  String _parseSeverityFromResponse(dynamic kinectData) {
+    if (kinectData is Map<String, dynamic>) {
+      final dynamic responseValue = kinectData['respuesta_modelo'];
+      if (responseValue is String) {
+        final RegExp regex = RegExp(r'(ALTA|MEDIA|BAJA)', caseSensitive: false);
+        final Match? match = regex.firstMatch(responseValue);
+        if (match != null) {
+          return match.group(0)!.toUpperCase();
+        }
+      }
     }
-
-    final record = {
-      'groupId': widget.pathology['groupId'],
-      'pathology': widget.pathology['name'],
-      'severity': _severity,
-      'notes': _notesCtrl.text,
-      'photo': _photoFile?.path,
-      'timestamp': DateTime.now().toIso8601String(),
-    };
-
-    print('Registro local temporal: $record');
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Registro guardado localmente')),
-    );
-
-    Navigator.pop(context);
+    return 'Baja'; // Valor por defecto si algo falla
   }
 
+  /// Obtiene el texto de la respuesta para guardarlo en las notas, manejando cualquier tipo de dato.
+  String _getRawResponseForNotes(dynamic kinectData) {
+    if (kinectData is Map<String, dynamic> && kinectData.containsKey('respuesta_modelo')) {
+        return kinectData['respuesta_modelo'].toString();
+    }
+    return kinectData.toString();
+  }
+
+  /// Realiza la petición GET y devuelve 'dynamic' para ser flexible a la respuesta.
+  Future<dynamic> _getKinectPrediction() async {
+    final pathologyName =
+        widget.pathologyType.name.toLowerCase().replaceAll(' ', '_');
+    final uri = Uri.parse(
+        'http://10.194.151.75:8000/api/kinect/evaluar/?patologia=$pathologyName');
+
+    final response = await http.get(uri).timeout(const Duration(seconds: 20));
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception('Error al conectar con Kinect: ${response.statusCode}');
+    }
+  }
+
+  /// Convierte un String a nuestro Enum `Severity`.
+  Severity _mapSeverityFromString(String severityString) {
+    switch (severityString.toUpperCase()) {
+      case 'ALTA':
+        return Severity.alta;
+      case 'MEDIA':
+        return Severity.media;
+      case 'BAJA':
+      default:
+        return Severity.baja;
+    }
+  }
+  
   @override
   void dispose() {
     _notesCtrl.dispose();
     super.dispose();
   }
 
-  // --- Widget para seleccionar severidad ---
-  Widget _severityChip(String label, Color color) {
-    final selected = _severity == label;
-    return ChoiceChip(
-      label: Text(
-        label,
-        style: TextStyle(color: selected ? Colors.white : color),
-      ),
-      selected: selected,
-      selectedColor: color,
-      backgroundColor: Colors.grey.shade100,
-      onSelected: (v) => setState(() => _severity = v ? label : null),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final p = widget.pathology;
+    final pType = widget.pathologyType;
     return Scaffold(
-      appBar: AppBar(title: Text(p['name'] ?? 'Patología')),
+      appBar: AppBar(title: Text(pType.name)),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (p['image'] != null)
+            if (pType.imageAsset.isNotEmpty)
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image.asset(
-                  p['image'],
+                  pType.imageAsset,
                   fit: BoxFit.cover,
                   height: 200,
                   width: double.infinity,
@@ -157,83 +164,46 @@ class _PathologyFormState extends State<PathologyForm> {
               ),
             const SizedBox(height: 12),
             Text(
-              p['name'] ?? '',
+              pType.name,
               style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            Text(p['desc'] ?? '', style: const TextStyle(fontSize: 14)),
-            const SizedBox(height: 16),
-            const Text('Nivel de severidad',
+            Text(pType.description, style: const TextStyle(fontSize: 14)),
+            const SizedBox(height: 24),
+            const Text('Observaciones (opcional)',
                 style: TextStyle(fontWeight: FontWeight.w600)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                _severityChip('Baja', Colors.green),
-                _severityChip('Media', Colors.orange),
-                _severityChip('Alta', Colors.red),
-              ],
-            ),
-            const SizedBox(height: 16),
-            const Text('Observaciones (opcional)'),
             const SizedBox(height: 8),
             TextField(
               controller: _notesCtrl,
               maxLines: 3,
               decoration: InputDecoration(
+                hintText: 'Añadir notas sobre el hallazgo...',
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            const Text('Fotografía (tocar para tomar)'),
-            const SizedBox(height: 8),
-            GestureDetector(
-              onTap: _takePhoto,
-              child: Container(
-                height: 180,
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  color: Colors.grey.shade100,
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton.icon(
+                onPressed: _isProcessing ? null : _evaluateAndSaveRecord,
+                icon: const Icon(Icons.auto_awesome_outlined),
+                label: _isProcessing
+                    ? const Text('Procesando...')
+                    : const Text('Evaluar con Kinect y Guardar'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.teal,
+                  foregroundColor: Colors.white,
+                  textStyle: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    inherit: false,
+                  ),
                 ),
-                child: _photoFile == null
-                    ? const Center(
-                        child: Icon(Icons.camera_alt,
-                            size: 48, color: Colors.black45),
-                      )
-                    : ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Image.file(_photoFile!, fit: BoxFit.cover),
-                      ),
               ),
             ),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _saveLocal,
-                    icon: const Icon(Icons.save),
-                    label: const Text('Guardar local'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _sending ? null : _sendToPi,
-                    icon: const Icon(Icons.send),
-                    label: _sending
-                        ? const Text('Enviando...')
-                        : const Text('Enviar a Raspberry Pi'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.teal,
-                    ),
-                  ),
-                ),
-              ],
-            )
           ],
         ),
       ),
