@@ -1,8 +1,8 @@
-// lib/pages/home_page.dart
-
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart'; // <-- IMPORTANTE: para formatear la fecha
+
 import '../models/models.dart';
-import '../services/api_service.dart'; // Importar el servicio
+import '../services/api_service.dart';
 import 'group_detail_page.dart';
 
 class HomePage extends StatefulWidget {
@@ -49,11 +49,12 @@ class _HomePageState extends State<HomePage> {
               if (name.isEmpty) return;
               
               try {
-                // Llamamos al API para crear el grupo
                 await _apiService.createGroup(name);
+                if (!mounted) return;
                 Navigator.pop(context);
-                _loadGroups(); // Recargamos la lista para ver el nuevo grupo
+                _loadGroups();
               } catch (e) {
+                if (!mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text('Error al crear el grupo: $e')),
                 );
@@ -95,14 +96,13 @@ class _HomePageState extends State<HomePage> {
               if (!snapshot.hasData || snapshot.data!.isEmpty) {
                 return const Center(
                   child: Text(
-                    'No hay grupos. Presiona + para crear uno.',
+                    'No hay grupos.\nPresiona + para crear uno.',
                     textAlign: TextAlign.center,
                   ),
                 );
               }
               
               final groups = snapshot.data!;
-              // El GridView no cambia, solo la forma de obtener los 'groups'
               return GridView.builder(
                 itemCount: groups.length,
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -122,7 +122,41 @@ class _HomePageState extends State<HomePage> {
                         ),
                       );
                     },
-                    child: Card(/* ... el diseño de la tarjeta no cambia ... */),
+                    // --- ¡AQUÍ ESTÁ LA CORRECCIÓN! ---
+                    // Hemos añadido el contenido dentro de la Card.
+                    child: Card(
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                      elevation: 4,
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              Icons.folder_open_outlined,
+                              size: 40,
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              g.name, // <-- Mostramos el nombre del grupo
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const Spacer(), // Empuja la fecha hacia abajo
+                            Text(
+                              'Creado: ${DateFormat.yMd().format(g.createdAt.toLocal())}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   );
                 },
               );

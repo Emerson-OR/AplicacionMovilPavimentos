@@ -5,7 +5,7 @@ import '../models/models.dart';
 class ApiService {
   // --- ¡MUY IMPORTANTE! ---
   // Reemplaza esta IP con la dirección IP de la computadora donde corre tu servidor Django.
-  static const String _baseUrl = 'http://10.194.151.65:8000/api';
+  static const String _baseUrl = 'http://192.168.80.34:8000/api';
 
   /// Obtiene la lista de todos los grupos desde el API.
   Future<List<Group>> getGroups() async {
